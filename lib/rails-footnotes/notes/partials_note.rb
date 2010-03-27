@@ -1,3 +1,5 @@
+require "#{File.dirname(__FILE__)}/log_note"
+
 module Footnotes
   module Notes
     class PartialsNote < LogNote
@@ -45,6 +47,6 @@ module Footnotes
             partials.reverse
           end
         end
-    end    
+    end
   end
 end
