@@ -101,7 +101,7 @@ module Footnotes
     end
 
     def add_footnotes!
-      add_footnotes_without_validation! if valid?
+      add_footnotes_without_validation! if valid?(true)
     rescue Exception => e
       # Discard footnotes if there are any problems
       self.class.log_error("Footnotes Exception", e)
@@ -118,15 +118,21 @@ module Footnotes
     end
 
     protected
-      def valid?
-        performed_render? && valid_format? && valid_content_type? &&
-          @body.is_a?(String) && !component_request? && !xhr? &&
+      def valid?(xhrmode = false)
+        normal = performed_render? && valid_format? && valid_content_type? &&
+          @body.is_a?(String) && !component_request? && !xhr?
           !footnotes_disabled?
+        normal = !normal if( !normal && xhrmode && xhr? && (xhr_js_format? || valid_format?))
+	normal
       end
 
       def add_footnotes_without_validation!
         initialize_notes!
-        insert_styles unless @@no_style
+
+        no_style = @@no_style
+        no_style = true if xhr?
+
+        insert_styles unless no_style
         insert_footnotes
       end
 
@@ -143,6 +149,10 @@ module Footnotes
 
       def valid_format?
         [:html,:rhtml,:xhtml,:rxhtml].include?(@template.template_format.to_sym)
+      end
+
+      def xhr_js_format?
+	[:js,:update,:json].include?(@template.template_format.to_sym)
       end
 
       def valid_content_type?
@@ -190,62 +200,97 @@ module Footnotes
         # Fieldsets method should be called first
         content = fieldsets
 
-        footnotes_html = <<-HTML
-        <!-- Footnotes -->
-        <div style="clear:both"></div>
-        <div id="footnotes_debug">
-          #{links}
-          #{content}
-          <script type="text/javascript">
-            var Footnotes = function() {
+	footnotes_html = if xhr?
+		<<-HTML
+			#{links}
+			#{content}
+		HTML
+	else
+		<<-HTML
+		<!-- Footnotes -->
+		<div style="clear:both"></div>
+		<div id="footnotes_debug">
+			<div id="footnotes_debug_content">
+			#{links}
+			#{content}
+			</div>
+		<script type="text/javascript">
+		var Footnotes = function() {
 
-              function hideAll(){
-                #{close unless @@multiple_notes}
-              }
-              
-              function hideAllAndToggle(id) {
-                hideAll();
-                toggle(id)
+		function hideAll(){
+			#{close unless @@multiple_notes}
+		}
 
-                location.href = '#footnotes_debug';
-              }  
-              
-              function toggle(id){
-                var el = document.getElementById(id);
-                if (el.style.display == 'none') {
-                  Footnotes.show(el);
-                } else {
-                  Footnotes.hide(el);
-                }
-              }
-            
-              function show(element) {
-                element.style.display = 'block'
-              }
-            
-              function hide(element) {
-                element.style.display = 'none'
-              }
+		function hideAllAndToggle(id) {
+			hideAll();
+			toggle(id)
 
-              return {
-                show: show,
-                hide: hide,
-                toggle: toggle,
-                hideAllAndToggle: hideAllAndToggle
-              }
-            }();
-            /* Additional Javascript */
-            #{@notes.map(&:javascript).compact.join("\n")}
-          </script>
-        </div>
-        <!-- End Footnotes -->
-        HTML
+			location.href = '#footnotes_debug';
+		}
 
-        placeholder = /<div[^>]+id=['"]footnotes_holder['"][^>]*>/i
-        if @body =~ placeholder
-          insert_text :after, placeholder, footnotes_html
+		function toggle(id){
+			var el = document.getElementById(id);
+			if (el.style.display == 'none') {
+			Footnotes.show(el);
+			} else {
+			Footnotes.hide(el);
+			}
+		}
+
+		function show(element) {
+			element.style.display = 'block'
+		}
+
+		function hide(element) {
+			element.style.display = 'none'
+		}
+
+		return {
+			show: show,
+			hide: hide,
+			toggle: toggle,
+			hideAllAndToggle: hideAllAndToggle
+		}
+		}();
+		/* Additional Javascript */
+		#{@notes.map(&:javascript).compact.join("\n")}
+
+		/* footnotes json parser */
+		Ajax.Responders.register({
+			onComplete: function(request ,response) {
+				if (response.responseJSON) {
+					if (response.responseJSON.footnotes) {
+						$('footnotes_debug_content').update(response.responseJSON.footnotes);
+						delete response.responseJSON.footnotes;
+					}
+
+				}
+			}
+		});
+		</script>
+		</div>
+		<!-- End Footnotes -->
+		HTML
+	end
+
+	if !xhr?
+		placeholder = /<div[^>]+id=['"]footnotes_holder['"][^>]*>/i
+		if @body =~ placeholder
+		insert_text :after, placeholder, footnotes_html
+		else
+		insert_text :before, /<\/body>/i, footnotes_html
+		end
         else
-          insert_text :before, /<\/body>/i, footnotes_html
+		case @controller.response.headers['Content-Type'].to_s
+		when /javascript/
+			@body.insert(@body.size, 'try{$(\'footnotes_debug_content\').update("'+escape_javascript(footnotes_html)+'");}catch(e){alert("Element.update(\\"footnotes_debug_content\\");"); throw e}')
+		when /html/
+			@body.insert(@body.size, '<script type="text/javascript> try{$(\'footnotes_debug_content\').update("'+escape_javascript(footnotes_html)+'");}catch(e){alert("Element.update(\\"footnotes_debug_content\\");"); throw e}</script>')
+		when /json/
+			json = ActiveSupport::JSON.decode(@body)
+			json[:footnotes] = footnotes_html
+			@controller.response.body = ActiveSupport::JSON.encode(json)
+		end
         end
       end
 
@@ -337,9 +382,18 @@ module Footnotes
       end
 
       # Instance each_with_rescue method
-      # 
+      #
       def each_with_rescue(*args, &block)
         self.class.each_with_rescue(*args, &block)
+      end
+
+
+      def escape_javascript(javascript)
+         if javascript
+           javascript.gsub(/(\\|<\/|\r\n|[\n\r"'])/) { ActionView::Helpers::JavaScriptHelper::JS_ESCAPE_MAP[$1] }
+         else
+           ''
+         end
       end
 
   end
